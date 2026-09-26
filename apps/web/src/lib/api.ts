@@ -1,8 +1,17 @@
 import 'server-only';
 import type { Quote } from './types';
 
-const API_BASE_URL = process.env.API_BASE_URL ?? 'http://localhost:3001';
 const TIMEOUT_MS = 10_000;
+
+/** Read per request (not at import) so `next build` works without it; production must set it. */
+function apiBaseUrl(): string {
+  const url = process.env.API_BASE_URL;
+  if (url) return url;
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('API_BASE_URL is not set');
+  }
+  return 'http://localhost:3001';
+}
 
 /** A failed API call, carrying the API's error envelope. */
 export class ApiError extends Error {
@@ -28,9 +37,10 @@ async function apiFetch<T>(
   path: string,
   { method = 'GET', body, headers }: RequestOptions = {},
 ): Promise<T> {
+  const url = `${apiBaseUrl()}/api/v1${path}`;
   let response: Response;
   try {
-    response = await fetch(`${API_BASE_URL}/api/v1${path}`, {
+    response = await fetch(url, {
       method,
       headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...headers },
       body: body === undefined ? undefined : JSON.stringify(body),
@@ -83,7 +93,10 @@ export interface DeclarationInput {
 }
 
 export function submitDeclaration(input: DeclarationInput) {
-  return apiFetch<{ status: string }>('/insurance/declaration', { method: 'POST', body: input });
+  return apiFetch<{ status: string; repriced: boolean }>('/insurance/declaration', {
+    method: 'POST',
+    body: input,
+  });
 }
 
 export function checkout(input: { quoteId: string; paymentToken: string }, idempotencyKey: string) {

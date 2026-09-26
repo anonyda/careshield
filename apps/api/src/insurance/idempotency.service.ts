@@ -120,11 +120,25 @@ export class IdempotencyService {
     }
   }
 
+  /**
+   * Confirms we still hold the key and restarts its TTL, so nobody can take it over while we
+   * act on that answer (e.g. refund). Returns the renewed lock, or null if the key was taken
+   * over or already completed.
+   */
+  async renew(lock: IdempotencyLock): Promise<IdempotencyLock | null> {
+    const lockedAt = new Date();
+    const { count } = await this.prisma.idempotencyKey.updateMany({
+      where: { key: lock.key, status: IdempotencyStatus.IN_PROGRESS, lockedAt: lock.lockedAt },
+      data: { lockedAt },
+    });
+    return count === 1 ? { ...lock, lockedAt } : null;
+  }
+
   /** Frees the key after a transient failure so the client may retry with it. */
   async release(lock: IdempotencyLock): Promise<void> {
-    await this.prisma.idempotencyKey.deleteMany({
+    const { count } = await this.prisma.idempotencyKey.deleteMany({
       where: { key: lock.key, status: IdempotencyStatus.IN_PROGRESS, lockedAt: lock.lockedAt },
     });
-    this.logger.log(`Idempotency key ${lock.key}: released`);
+    if (count > 0) this.logger.log(`Idempotency key ${lock.key}: released`);
   }
 }

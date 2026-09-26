@@ -10,21 +10,28 @@ import { formatDateTime, formatINR } from '@/lib/format';
 import type { Quote } from '@/lib/types';
 import { QuoteSkeleton } from './QuoteSkeleton';
 
-export default async function QuotePage({ params }: { params: Promise<{ quoteId: string }> }) {
+export default async function QuotePage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ quoteId: string }>;
+  searchParams: Promise<{ repriced?: string }>;
+}) {
   const { quoteId } = await params;
+  const { repriced } = await searchParams;
   // The heading streams immediately; the quote-dependent content streams in when ready.
   return (
     <>
       <h1 className="sr-only">Your CareShield Max application</h1>
       <Suspense fallback={<QuoteSkeleton />}>
-        <QuoteStep quoteId={quoteId} />
+        <QuoteStep quoteId={quoteId} repriced={repriced === '1'} />
       </Suspense>
     </>
   );
 }
 
 /** Renders the step that matches the stored status, so every step survives a refresh. */
-async function QuoteStep({ quoteId }: { quoteId: string }) {
+async function QuoteStep({ quoteId, repriced }: { quoteId: string; repriced: boolean }) {
   const quote = await getQuote(quoteId);
   if (!quote) notFound();
 
@@ -61,7 +68,22 @@ async function QuoteStep({ quoteId }: { quoteId: string }) {
           expiresAt={quote.expiresAt}
           serverTime={quote.serverTime}
           initiallyExpired={expired}
-          summary={summary}
+          summary={
+            repriced ? (
+              <>
+                <p
+                  role="status"
+                  className="rounded-lg border border-teal-300 bg-teal-50 p-4 text-sm text-teal-900"
+                >
+                  Good news: you declared no pre-existing conditions, so we&apos;ve removed the
+                  condition loading. Your new total is {formatINR(quote.premium.total)}.
+                </p>
+                {summary}
+              </>
+            ) : (
+              summary
+            )
+          }
         />
       );
     case 'POLICY_ISSUED':

@@ -9,13 +9,18 @@ import {
 } from '../common/errors/domain-errors';
 import { PrismaService } from '../prisma/prisma.service';
 import { DeclarationDto } from './dto/declaration.dto';
-import { isExpired } from './quote.service';
+import { calculatePremium, formatMoney } from './premium.calculator';
+import { isExpired, QuoteView } from './quote.service';
 import { transitionQuote } from './quote-state-machine';
 
 export interface DeclarationResult {
   quoteId: string;
   eligible: true;
   status: QuoteStatus;
+  /** True when the premium was lowered because no conditions were declared. */
+  repriced: boolean;
+  /** The premium the customer will pay (after any repricing). */
+  premium: QuoteView['premium'];
   expiresAt: string;
   serverTime: string;
 }
@@ -64,27 +69,55 @@ export class DeclarationService {
       throw new NotEligibleError(reason);
     }
 
-    // Rule 4: store and move to MEDICAL_DECLARED in one compare-and-set update.
+    // Rule 4: priced with conditions but none declared, so drop the condition loading rather
+    // than charge for conditions the customer doesn't have. The price lock window is unchanged.
+    const repriced = quote.hasPreExistingConditions && !declaresConditions;
+    const premium = repriced
+      ? calculatePremium({ age: quote.age, hasPreExistingConditions: false })
+      : quote;
+
+    // Rule 5: store and move to MEDICAL_DECLARED in one compare-and-set update.
     const declaration: Prisma.InputJsonObject = {
       isSmoker: dto.isSmoker,
       hospitalizedLast24Months: dto.hospitalizedLast24Months,
       hasCriticalIllnessDiagnosis: dto.hasCriticalIllnessDiagnosis,
       conditions: dto.conditions,
       additionalDetails: dto.additionalDetails?.trim() || null,
+      // Audit trail: what the quote cost before the declaration lowered it.
+      ...(repriced && { repricedFromTotal: formatMoney(quote.totalPremium) }),
     };
     await transitionQuote(this.prisma, {
       quoteId: quote.id,
       from: QuoteStatus.QUOTE_GENERATED,
       to: QuoteStatus.MEDICAL_DECLARED,
       now,
-      data: { medicalDeclaration: declaration, declaredAt: now },
+      data: {
+        medicalDeclaration: declaration,
+        declaredAt: now,
+        ...(repriced && {
+          hasPreExistingConditions: false,
+          conditionLoading: premium.conditionLoading,
+          totalPremium: premium.totalPremium,
+        }),
+      },
     });
-    this.logger.log(`Quote ${quote.id}: QUOTE_GENERATED -> MEDICAL_DECLARED`);
+    this.logger.log(
+      repriced
+        ? `Quote ${quote.id}: QUOTE_GENERATED -> MEDICAL_DECLARED, repriced ${formatMoney(quote.totalPremium)} -> ${formatMoney(premium.totalPremium)} INR`
+        : `Quote ${quote.id}: QUOTE_GENERATED -> MEDICAL_DECLARED`,
+    );
 
     return {
       quoteId: quote.id,
       eligible: true,
       status: QuoteStatus.MEDICAL_DECLARED,
+      repriced,
+      premium: {
+        base: formatMoney(premium.basePremium),
+        ageLoading: formatMoney(premium.ageLoading),
+        conditionLoading: formatMoney(premium.conditionLoading),
+        total: formatMoney(premium.totalPremium),
+      },
       expiresAt: quote.expiresAt.toISOString(),
       serverTime: new Date().toISOString(),
     };

@@ -87,15 +87,16 @@ export async function submitDeclarationAction(
     return { fieldErrors };
   }
 
+  let repriced: boolean;
   try {
-    await submitDeclaration({
+    ({ repriced } = await submitDeclaration({
       quoteId,
       isSmoker,
       hospitalizedLast24Months,
       hasCriticalIllnessDiagnosis,
       conditions,
       additionalDetails: additionalDetails || undefined,
-    });
+    }));
   } catch (error) {
     if (!(error instanceof ApiError)) throw error;
     if (error.code === 'INVALID_STATE') redirect(`/quote/${quoteId}`);
@@ -106,8 +107,8 @@ export async function submitDeclarationAction(
       fieldErrors: firstFieldErrors(error.details),
     };
   }
-  // Re-render the quote page, which now shows the payment step.
-  redirect(`/quote/${quoteId}`);
+  // Re-render the quote page, which now shows the payment step (and a note if the price dropped).
+  redirect(repriced ? `/quote/${quoteId}?repriced=1` : `/quote/${quoteId}`);
 }
 
 const IN_PROGRESS_RETRIES = 5;
