@@ -17,7 +17,8 @@ export async function createTestApp(): Promise<TestContext> {
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
   const app = moduleRef.createNestApplication<INestApplication<App>>({ logger: false });
   configureApp(app);
-  await app.init();
+  // Listen once so parallel supertest calls share one server instead of each starting its own.
+  await app.listen(0);
   return { app, prisma: app.get(PrismaService), gateway: app.get(MockPaymentGateway) };
 }
 
