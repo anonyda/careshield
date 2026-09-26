@@ -78,7 +78,7 @@ describe('Checkout API (e2e)', () => {
     expect(executed).toHaveLength(1);
     for (const r of responses) {
       if (r.status === 200) {
-        expect(r.body).toEqual(executed[0].body);
+        expect(r.text).toBe(executed[0].text);
       } else {
         expect(r.status).toBe(409);
         expect(r.body.code).toBe('REQUEST_IN_PROGRESS');
@@ -90,7 +90,7 @@ describe('Checkout API (e2e)', () => {
 
     const replay = await checkout(key, quoteId).expect(200);
     expect(replay.headers['idempotent-replayed']).toBe('true');
-    expect(replay.body).toEqual(executed[0].body);
+    expect(replay.text).toBe(executed[0].text); // byte-identical, not just equivalent
     expect(ctx.gateway.chargeCount).toBe(1);
   });
 
@@ -186,7 +186,7 @@ describe('Checkout API (e2e)', () => {
 
     const replay = await checkout(key, quoteId, 'tok_declined').expect(402);
     expect(replay.headers['idempotent-replayed']).toBe('true');
-    expect(replay.body).toEqual(res.body);
+    expect(replay.text).toBe(res.text);
     expect(await quoteStatus(quoteId)).toBe('MEDICAL_DECLARED');
 
     // A new attempt (new key) with a working card goes through.

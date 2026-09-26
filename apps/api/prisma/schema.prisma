@@ -57,7 +57,7 @@ model IdempotencyKey {
   requestHash    String            @map("request_hash")
   status         IdempotencyStatus @default(IN_PROGRESS)
   responseStatus Int?              @map("response_status")
-  responseBody   Json?             @map("response_body")
+  responseBody   Json?             @map("response_body") @db.Json // json, not jsonb: replays return the exact bytes stored
   lockedAt       DateTime          @default(now()) @map("locked_at") @db.Timestamptz(3)
   createdAt      DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
   completedAt    DateTime?         @map("completed_at") @db.Timestamptz(3)
