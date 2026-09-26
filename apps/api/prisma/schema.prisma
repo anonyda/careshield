@@ -1,0 +1,66 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum QuoteStatus {
+  QUOTE_GENERATED
+  MEDICAL_DECLARED
+  PREMIUM_PAID
+  POLICY_ISSUED
+}
+
+enum IdempotencyStatus {
+  IN_PROGRESS
+  COMPLETED
+}
+
+model Quote {
+  id                       String      @id @default(uuid()) @db.Uuid
+  age                      Int
+  hasPreExistingConditions Boolean     @map("has_pre_existing_conditions")
+  basePremium              Decimal     @map("base_premium") @db.Decimal(10, 2)
+  ageLoading               Decimal     @map("age_loading") @db.Decimal(10, 2)
+  conditionLoading         Decimal     @map("condition_loading") @db.Decimal(10, 2)
+  totalPremium             Decimal     @map("total_premium") @db.Decimal(10, 2)
+  currency                 String      @default("INR") @db.VarChar(3)
+  status                   QuoteStatus @default(QUOTE_GENERATED)
+  medicalDeclaration       Json?       @map("medical_declaration")
+  declaredAt               DateTime?   @map("declared_at") @db.Timestamptz(3)
+  createdAt                DateTime    @default(now()) @map("created_at") @db.Timestamptz(3)
+  expiresAt                DateTime    @map("expires_at") @db.Timestamptz(3)
+  updatedAt                DateTime    @updatedAt @map("updated_at") @db.Timestamptz(3)
+  policy                   Policy?
+
+  @@index([status, expiresAt])
+  @@map("quotes")
+}
+
+model Policy {
+  id               String   @id @default(uuid()) @db.Uuid
+  quoteId          String   @unique @map("quote_id") @db.Uuid // one policy per quote, DB-enforced
+  policyNumber     String   @unique @map("policy_number") // e.g. CSM-2026-7F3K9Q2M
+  premiumPaid      Decimal  @map("premium_paid") @db.Decimal(10, 2)
+  paymentReference String   @map("payment_reference")
+  issuedAt         DateTime @default(now()) @map("issued_at") @db.Timestamptz(3)
+  quote            Quote    @relation(fields: [quoteId], references: [id])
+
+  @@map("policies")
+}
+
+model IdempotencyKey {
+  key            String            @id
+  requestHash    String            @map("request_hash")
+  status         IdempotencyStatus @default(IN_PROGRESS)
+  responseStatus Int?              @map("response_status")
+  responseBody   Json?             @map("response_body")
+  lockedAt       DateTime          @default(now()) @map("locked_at") @db.Timestamptz(3)
+  createdAt      DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
+  completedAt    DateTime?         @map("completed_at") @db.Timestamptz(3)
+
+  @@map("idempotency_keys")
+}
