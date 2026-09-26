@@ -4,11 +4,13 @@ import { Test } from '@nestjs/testing';
 import { App } from 'supertest/types';
 import { AppModule } from '../../src/app.module';
 import { configureApp } from '../../src/configure-app';
+import { MockPaymentGateway } from '../../src/payments/mock-payment-gateway';
 import { PrismaService } from '../../src/prisma/prisma.service';
 
 export interface TestContext {
   app: INestApplication<App>;
   prisma: PrismaService;
+  gateway: MockPaymentGateway;
 }
 
 export async function createTestApp(): Promise<TestContext> {
@@ -16,7 +18,7 @@ export async function createTestApp(): Promise<TestContext> {
   const app = moduleRef.createNestApplication<INestApplication<App>>({ logger: false });
   configureApp(app);
   await app.init();
-  return { app, prisma: app.get(PrismaService) };
+  return { app, prisma: app.get(PrismaService), gateway: app.get(MockPaymentGateway) };
 }
 
 export async function resetDatabase(prisma: PrismaService): Promise<void> {

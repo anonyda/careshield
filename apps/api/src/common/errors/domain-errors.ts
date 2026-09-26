@@ -1,3 +1,10 @@
+export interface ErrorEnvelope {
+  statusCode: number;
+  code: string;
+  message: string;
+  details: unknown;
+}
+
 /**
  * Domain errors carry their own HTTP status and machine-readable code.
  * The global exception filter turns them into the standard error envelope.
@@ -11,6 +18,15 @@ export abstract class DomainError extends Error {
   constructor(message: string) {
     super(message);
     this.name = new.target.name;
+  }
+
+  toEnvelope(): ErrorEnvelope {
+    return {
+      statusCode: this.statusCode,
+      code: this.code,
+      message: this.message,
+      details: this.details,
+    };
   }
 }
 

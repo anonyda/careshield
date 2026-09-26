@@ -7,14 +7,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { Response } from 'express';
-import { DomainError } from '../errors/domain-errors';
-
-export interface ErrorEnvelope {
-  statusCode: number;
-  code: string;
-  message: string;
-  details: unknown;
-}
+import { DomainError, ErrorEnvelope } from '../errors/domain-errors';
 
 const DEFAULT_CODES: Record<number, string> = {
   400: 'BAD_REQUEST',
@@ -50,15 +43,7 @@ export class HttpExceptionFilter implements ExceptionFilter {
     headers: Readonly<Record<string, string>>;
   } {
     if (exception instanceof DomainError) {
-      return {
-        envelope: {
-          statusCode: exception.statusCode,
-          code: exception.code,
-          message: exception.message,
-          details: exception.details,
-        },
-        headers: exception.headers,
-      };
+      return { envelope: exception.toEnvelope(), headers: exception.headers };
     }
 
     if (exception instanceof HttpException) {
