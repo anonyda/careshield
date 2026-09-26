@@ -1,0 +1,33 @@
+{
+  "name": "careshield-buy-journey",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "apps/api",
+    "apps/web"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "db:up": "docker compose up -d --wait",
+    "db:down": "docker compose down",
+    "db:migrate": "npm run db:migrate --workspace api",
+    "db:setup": "npm run db:up && npm run db:migrate",
+    "dev": "concurrently -n api,web -c blue,green \"npm run start:dev --workspace api\" \"npm run dev --workspace web\"",
+    "build": "npm run build --workspace api && npm run build --workspace web",
+    "lint": "npm run lint --workspace api && npm run lint --workspace web",
+    "test": "npm run test --workspace api && npm run test:e2e --workspace api && npm run test --workspace web",
+    "format": "prettier --write ."
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "prettier": "^3.4.2"
+  },
+  "allowScripts": {
+    "@prisma/client": true,
+    "@prisma/engines": true,
+    "prisma": true,
+    "unrs-resolver": true
+  }
+}
