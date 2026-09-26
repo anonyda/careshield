@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
 import { CheckoutService } from '../src/insurance/checkout.service';
@@ -9,6 +10,7 @@ import {
   expireQuote,
   resetDatabase,
   TestContext,
+  validDeclaration,
 } from './setup/test-app';
 
 describe('Checkout API (e2e)', () => {
@@ -250,6 +252,98 @@ describe('Checkout API (e2e)', () => {
     expect(await policyCount(quoteId)).toBe(1);
   });
 
+  describe('takeover of a lock whose holder is slow, not crashed', () => {
+    /** Makes the current holder's lock look stale so the next request with the key takes over. */
+    const makeLockStale = (key: string) =>
+      ctx.prisma.idempotencyKey.update({
+        where: { key },
+        data: { lockedAt: new Date(Date.now() - 5 * 60_000) },
+      });
+
+    it('the new holder commits first: the slow holder must not refund the shared charge', async () => {
+      const quoteId = await createDeclaredQuote(ctx);
+      const key = newKey();
+      const charge = ctx.gateway.charge.bind(ctx.gateway);
+      let takeover: request.Response | undefined;
+
+      jest.spyOn(ctx.gateway, 'charge').mockImplementationOnce(async (input) => {
+        const result = await charge(input);
+        // While the slow holder is still "at the gateway", a retry takes over and finishes.
+        await makeLockStale(key);
+        takeover = await checkout(key, quoteId);
+        return result;
+      });
+
+      const slow = await checkout(key, quoteId);
+
+      expect(takeover?.status).toBe(200);
+      expect(slow.status).toBe(409);
+      expect(await policyCount(quoteId)).toBe(1);
+      expect(ctx.gateway.chargeCount).toBe(1);
+      expect(ctx.gateway.refunds).toHaveLength(0);
+      expect((await keyRow(key))?.status).toBe('COMPLETED');
+    });
+
+    it('the slow holder commits after losing the key: it rolls back and does not refund', async () => {
+      const quoteId = await createDeclaredQuote(ctx);
+      const key = newKey();
+      const charge = ctx.gateway.charge.bind(ctx.gateway);
+      let releaseTakeover!: () => void;
+      const slowHolderDone = new Promise<void>((resolve) => (releaseTakeover = resolve));
+      let takeoverEntered!: () => void;
+      const takeoverAtGateway = new Promise<void>((resolve) => (takeoverEntered = resolve));
+      let takeover!: Promise<request.Response>;
+
+      jest
+        .spyOn(ctx.gateway, 'charge')
+        .mockImplementationOnce(async (input) => {
+          const result = await charge(input);
+          await makeLockStale(key);
+          takeover = checkout(key, quoteId).then((res) => res);
+          await takeoverAtGateway; // the retry now owns the key
+          return result;
+        })
+        .mockImplementationOnce(async (input) => {
+          takeoverEntered();
+          await slowHolderDone; // let the slow holder try (and fail) to commit first
+          return charge(input);
+        });
+
+      const slow = await checkout(key, quoteId);
+      releaseTakeover();
+      const winner = await takeover;
+
+      expect(slow.status).toBe(500);
+      expect(winner.status).toBe(200);
+      expect(await policyCount(quoteId)).toBe(1);
+      expect(ctx.gateway.chargeCount).toBe(1);
+      expect(ctx.gateway.refunds).toHaveLength(0);
+      const policy = await ctx.prisma.policy.findUniqueOrThrow({ where: { quoteId } });
+      expect(policy.paymentReference).toBe(winner.body.paymentReference);
+    });
+  });
+
+  it('logs a failed refund for reconciliation and still releases the key', async () => {
+    const quoteId = await createDeclaredQuote(ctx);
+    const key = newKey();
+    const errors = jest.spyOn(Logger.prototype, 'error');
+    jest
+      .spyOn(ctx.app.get(CheckoutService), 'insertPolicy')
+      .mockRejectedValueOnce(new Error('boom'));
+    jest.spyOn(ctx.gateway, 'refund').mockRejectedValueOnce(new Error('gateway refund down'));
+
+    const res = await checkout(key, quoteId).expect(500);
+
+    expect(res.body.code).toBe('INTERNAL_ERROR');
+    expect(errors).toHaveBeenCalledWith(
+      expect.stringContaining('REFUND FAILED, needs reconciliation'),
+      expect.anything(),
+    );
+    expect(await quoteStatus(quoteId)).toBe('MEDICAL_DECLARED');
+    expect(await policyCount(quoteId)).toBe(0);
+    expect(await keyRow(key)).toBeNull();
+  });
+
   it('reports a fresh in-progress lock as 409 REQUEST_IN_PROGRESS', async () => {
     const quoteId = await createDeclaredQuote(ctx);
     const key = newKey();
@@ -259,6 +353,20 @@ describe('Checkout API (e2e)', () => {
 
     const res = await checkout(key, quoteId).expect(409);
     expect(res.body.code).toBe('REQUEST_IN_PROGRESS');
+  });
+
+  it('charges the repriced total after a NONE declaration lowered it', async () => {
+    const quoteId = await createQuote(ctx, { age: 50, hasPreExistingConditions: true });
+    await request(ctx.app.getHttpServer())
+      .post('/api/v1/insurance/declaration')
+      .send({ quoteId, ...validDeclaration, conditions: ['NONE'] })
+      .expect(200);
+    const charge = jest.spyOn(ctx.gateway, 'charge');
+
+    const res = await checkout(newKey(), quoteId).expect(200);
+
+    expect(res.body.policy.premiumPaid).toBe('15000.00');
+    expect(charge).toHaveBeenCalledWith(expect.objectContaining({ amount: '15000.00' }));
   });
 
   it('refuses to pay before the medical declaration', async () => {

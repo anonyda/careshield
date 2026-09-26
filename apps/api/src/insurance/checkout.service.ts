@@ -58,7 +58,7 @@ export function generatePolicyNumber(now: Date): string {
 /**
  * Checkout flow: acquire idempotency key -> pre-check quote -> charge (outside any DB
  * transaction) -> one transaction that issues the policy and stores the response ->
- * refund if that transaction fails.
+ * refund if that transaction fails and we still own the key.
  *
  * Deterministic failures (declined, expired, invalid state) are stored against the key and
  * replayed. Transient failures (gateway down, unexpected errors) release the key for retry.
@@ -130,11 +130,24 @@ export class CheckoutService {
       );
       return { statusCode: 200, body, replayed: false };
     } catch (error) {
+      // Only refund while we still own the key. If it was taken over, the new holder reuses
+      // this same charge (same gateway key) and must not find it refunded. If the key is
+      // already completed, the commit really succeeded and the charge backs a policy.
+      const owned = await this.idempotency.renew(lock).catch(() => null);
+      if (!owned) {
+        this.logger.warn(
+          `Not refunding payment ${reference} for quote ${quote.id}: key ${lock.key} is no longer ours or its state is unknown`,
+        );
+        throw error;
+      }
+
       // The customer was charged but no policy exists: give the money back.
       await this.refund(quote.id, reference);
       if (error instanceof QuoteExpiredError || error instanceof InvalidStateError) {
-        return this.finishWithError(lock, error);
+        return this.finishWithError(owned, error);
       }
+      // Transient: free the key (renewed above, so the caller's lock is stale) for a retry.
+      await this.idempotency.release(owned);
       throw error;
     }
   }

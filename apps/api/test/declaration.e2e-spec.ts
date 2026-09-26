@@ -30,6 +30,13 @@ describe('Declaration API (e2e)', () => {
       quoteId,
       eligible: true,
       status: 'MEDICAL_DECLARED',
+      repriced: false,
+      premium: {
+        base: '10000.00',
+        ageLoading: '0.00',
+        conditionLoading: '0.00',
+        total: '10000.00',
+      },
       expiresAt: expect.any(String),
       serverTime: expect.any(String),
     });
@@ -69,6 +76,35 @@ describe('Declaration API (e2e)', () => {
     expect(res.body.code).toBe('DECLARATION_INCONSISTENT');
     expect(res.body.message).toMatch(/recalculate your premium/i);
     expect(await statusOf(quoteId)).toBe('QUOTE_GENERATED');
+  });
+
+  it('reprices when the quote was priced with conditions but NONE is declared', async () => {
+    const quoteId = await createQuote(ctx, { age: 50, hasPreExistingConditions: true });
+    const before = await ctx.prisma.quote.findUniqueOrThrow({ where: { id: quoteId } });
+
+    const res = await declare({ quoteId, ...validDeclaration, conditions: ['NONE'] }).expect(200);
+
+    expect(res.body).toMatchObject({
+      status: 'MEDICAL_DECLARED',
+      repriced: true,
+      premium: {
+        base: '10000.00',
+        ageLoading: '5000.00',
+        conditionLoading: '0.00',
+        total: '15000.00',
+      },
+    });
+    const quote = await ctx.prisma.quote.findUniqueOrThrow({ where: { id: quoteId } });
+    expect(quote.hasPreExistingConditions).toBe(false);
+    expect(quote.totalPremium.toFixed(2)).toBe('15000.00');
+    expect(quote.expiresAt).toEqual(before.expiresAt); // the price lock is not extended
+    expect(quote.medicalDeclaration).toMatchObject({ repricedFromTotal: '20000.00' });
+  });
+
+  it('does not reprice when the declaration matches the quote', async () => {
+    const quoteId = await createQuote(ctx, { age: 50, hasPreExistingConditions: true });
+    const res = await declare({ quoteId, ...validDeclaration, conditions: ['ASTHMA'] }).expect(200);
+    expect(res.body).toMatchObject({ repriced: false, premium: { total: '20000.00' } });
   });
 
   it.each([

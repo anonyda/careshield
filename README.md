@@ -63,6 +63,9 @@ flowchart LR
   P --> DB[(PostgreSQL 16)]
 ```
 
+- There is no authentication yet, so a quote id is effectively a bearer token for that quote.
+  The web app sends `Referrer-Policy: no-referrer` so quote URLs don't leak to other sites; real
+  per-customer auth is the first item under "What I'd do next".
 - The browser never calls the API directly. Server Components and Server Actions call it
   server-side using `API_BASE_URL`, which is never exposed to the client.
 - Controllers only handle HTTP and DTOs. Business rules live in services. The premium calculator
@@ -85,11 +88,13 @@ stateDiagram-v2
 - The allowed transitions are a single map (`quote-state-machine.ts`). Anything else is rejected
   with `409 INVALID_STATE`.
 - Every transition is a **compare-and-set** update:
-  `UPDATE … WHERE id = $1 AND status = $from AND expires_at > now()`. If no row changes, the quote
+  `UPDATE … WHERE id = $1 AND status = $from AND expires_at > $now`. If no row changes, the quote
   is re-read to return a precise `404`, `409` or `410`. Two concurrent requests can never both move
   the same quote.
 - **Expiry is derived** (`expires_at <= now`), not stored as a status. Every state-changing
-  endpoint enforces it on the server.
+  endpoint enforces it on the server. `now` is the API server's clock, which also stamps
+  `created_at`/`expires_at`, so a single instance is self-consistent; with several instances,
+  keep their clocks NTP-synced.
 - `PREMIUM_PAID` is set and left inside the checkout transaction, so it is never visible outside
   it. It still exists and is traversed, so the state machine matches the business process.
 - An ineligible declaration returns `422` and does **not** change state.
@@ -122,7 +127,12 @@ Evaluated in order:
    lists any, the response is `422 DECLARATION_INCONSISTENT` and the user is asked to recalculate.
 3. **Eligibility:** a critical illness diagnosis, cancer or heart disease gives `422 NOT_ELIGIBLE`
    with a reason. State is unchanged.
-4. Otherwise the declaration is stored and the quote moves to `MEDICAL_DECLARED` (compare-and-set).
+4. **Repricing:** if the quote was priced _with_ pre-existing conditions but the declaration says
+   `NONE`, the condition loading is removed so the customer never pays for conditions they don't
+   have. The response has `"repriced": true`, the original total is kept in the stored declaration
+   (`repricedFromTotal`) for audit, and the 15-minute price lock is not extended.
+5. Otherwise the declaration is stored and the quote moves to `MEDICAL_DECLARED`. The status change
+   and any repricing are one compare-and-set update.
 
 `conditions` must be non-empty and unique, and `NONE` cannot be combined with other conditions.
 
@@ -179,6 +189,13 @@ curl -s -X POST http://localhost:3001/api/v1/insurance/declaration \
   "quoteId": "…",
   "eligible": true,
   "status": "MEDICAL_DECLARED",
+  "repriced": false,
+  "premium": {
+    "base": "10000.00",
+    "ageLoading": "5000.00",
+    "conditionLoading": "5000.00",
+    "total": "20000.00"
+  },
   "expiresAt": "…",
   "serverTime": "…"
 }
@@ -190,8 +207,10 @@ Errors: `400`, `404`, `409 INVALID_STATE`, `410 QUOTE_EXPIRED`, `422 DECLARATION
 ### Checkout: `POST /insurance/checkout` → `200`
 
 `Idempotency-Key` is required (8–128 characters from `[A-Za-z0-9_-]`). The header
-`idempotency_key` is accepted as an alias, and the canonical header wins if both are sent. Mock
-payment tokens: `tok_success`, `tok_declined`, `tok_error`.
+`idempotency_key` is accepted as an alias, and the canonical header wins if both are sent. Note
+that some proxies (e.g. nginx with its default `underscores_in_headers off`) drop headers with
+underscores, so clients behind one must use `Idempotency-Key`. Mock payment tokens: `tok_success`,
+`tok_declined`, `tok_error`.
 
 ```bash
 KEY=checkout-$(date +%s)
@@ -260,12 +279,23 @@ row locks. The gateway gets the stored `total_premium` as a string, never a reco
 Because the stored response is written in the same transaction as the policy, "policy exists" and
 "key completed" can never disagree: a retry either replays the exact response or finds no policy.
 
-**5. Compensate.** If the transaction fails after a successful charge, the payment is refunded
-(best effort; a failed refund is logged at `ERROR` with the quote id and payment reference for
-reconciliation).
+**5. Compensate.** If the transaction fails after a successful charge, the service first
+re-confirms (compare-and-set on `locked_at`, which also restarts the lock TTL) that it still owns
+the key, and only then refunds. A failed refund is logged at `ERROR` with the quote id and payment
+reference for reconciliation. If the key is no longer ours, nothing is refunded:
+
+- it was **taken over** by a retry, which reuses this same charge (same gateway key) and would
+  otherwise issue a policy against a refunded payment;
+- it is **completed**, meaning the commit actually succeeded (e.g. the connection dropped after
+  `COMMIT`) and the charge backs a real policy;
+- the database is **unreachable**, so the outcome is unknown. The key then stays `IN_PROGRESS`,
+  and a retry after the lock TTL takes it over and commits against the same charge.
+
+The remaining assumption is that a refund call completes well within the lock TTL.
 
 **Stored versus released.** Deterministic business outcomes are stored against the key and
-replayed: declined card (`402`), expired quote (`410`) and invalid state (`409`). Transient
+replayed: declined card (`402`), unknown quote (`404`), expired quote (`410`) and invalid state
+(`409`). Transient
 failures **release** the key (the row is deleted) so the client may retry with the same key:
 gateway unavailable (`502`) and unexpected errors (`500`).
 
@@ -284,7 +314,8 @@ makes a fresh charge rather than replaying the refunded one.
   `aria-busy` while the action is pending.
 - A `useRef` lock is checked **synchronously** in `onSubmit`, because `disabled` only applies after
   a re-render and a fast double click can land before that.
-- One idempotency key per checkout attempt (`crypto.randomUUID()`, held in a ref). It is reused for
+- One idempotency key per checkout attempt (`crypto.randomUUID()`, falling back to
+  `getRandomValues` outside a secure context, held in a ref). It is reused for
   retries of the same intent and replaced after a definitive result (declined or expired) or when
   the payment method changes.
 - `useOptimistic` flips the stepper to "Payment processing…" immediately and reverts on failure.
@@ -304,31 +335,33 @@ is only a convenience: the API enforces expiry regardless.
 
 ## Testing
 
-| Layer   | What                                                                                                                                                                                                                                                                          | Tool                            |
-| ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- |
-| Unit    | Premium calculator (table-driven: 18, 45, 46, 99, all total combinations); state machine (every valid and invalid pair)                                                                                                                                                       | Jest                            |
-| API e2e | Quote validation, 900 000 ms lock, money as strings, `timestamptz`/`numeric` column types; declaration rules; checkout happy path, 10 parallel same-key calls, key reuse, rollback, expiry before and during payment, declined card, missing header, gateway down, stale lock | Jest + Supertest, real Postgres |
-| Web     | `useCountdown` with fake timers: counts down, corrects skew both ways, clamps at zero, cleans up                                                                                                                                                                              | Vitest + Testing Library        |
+| Layer   | What                                                                                                                                                                                                                                                                                                                                                     | Tool                            |
+| ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- |
+| Unit    | Premium calculator (table-driven: 18, 45, 46, 99, all total combinations); state machine (every valid and invalid pair)                                                                                                                                                                                                                                  | Jest                            |
+| API e2e | Quote validation, 900 000 ms lock, money as strings, `timestamptz`/`numeric` column types; declaration rules; checkout happy path, 10 parallel same-key calls, key reuse, rollback, expiry before and during payment, declined card, missing header, gateway down, stale lock, slow (not crashed) holder taken over in both commit orders, failed refund | Jest + Supertest, real Postgres |
+| Web     | `useCountdown` with fake timers: counts down, corrects skew both ways, clamps at zero, cleans up; idempotency key generation with and without `crypto.randomUUID`                                                                                                                                                                                        | Vitest + Testing Library        |
 
 ---
 
 ## Assumptions
 
-| #   | Ambiguity                    | Decision                                                                                                                                                                               |
-| --- | ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| A1  | Base for the 50% age loading | Base premium only, not compounded with the condition loading: ₹5,000 when age > 45.                                                                                                    |
-| A2  | Total formula                | `10000 + (age > 45 ? 5000 : 0) + (conditions ? 5000 : 0)`. Range ₹10,000–₹20,000. Age 45 gets no loading.                                                                              |
-| A3  | Valid ages                   | Integers 18–99 inclusive; anything else is `400`.                                                                                                                                      |
-| A4  | Currency                     | INR only, `NUMERIC(10,2)`, sent as two-decimal strings.                                                                                                                                |
-| A5  | "Deterministic"              | Same inputs always give the same premium; the calculator is pure.                                                                                                                      |
-| A6  | "Exactly 15 minutes"         | `expiresAt = createdAt + 15 min` from one `Date` instance. TTL comes from `QUOTE_TTL_SECONDS` (default 900) so expiry can be demoed.                                                   |
-| A7  | Declaration endpoint         | `POST /api/v1/insurance/declaration` with the rules above.                                                                                                                             |
-| A8  | State machine                | Exactly four states. An ineligible declaration does not change state (`422`). A `DECLINED` state is left as a next step.                                                               |
-| A9  | Expired quotes               | Derived from `expires_at`, enforced server-side on every state change. The UI timer is UX only.                                                                                        |
-| A10 | Payment                      | Mock gateway inside the API behind an interface. Tokens `tok_success`, `tok_declined`, `tok_error`. Latency configurable (default 800 ms) so loading and double clicks are observable. |
-| A11 | Idempotency header           | `Idempotency-Key` is canonical; `idempotency_key` is accepted as an alias. Required on checkout.                                                                                       |
-| A12 | Browser to API               | Only through Next.js Server Components and Server Actions, using a server-only `API_BASE_URL`.                                                                                         |
-| A13 | JSON naming                  | camelCase in JSON, snake_case columns in the database.                                                                                                                                 |
+| #   | Ambiguity                    | Decision                                                                                                                                                                                                                                       |
+| --- | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A1  | Base for the 50% age loading | Base premium only, not compounded with the condition loading: ₹5,000 when age > 45.                                                                                                                                                            |
+| A2  | Total formula                | `10000 + (age > 45 ? 5000 : 0) + (conditions ? 5000 : 0)`. Range ₹10,000–₹20,000. Age 45 gets no loading.                                                                                                                                      |
+| A3  | Valid ages                   | Integers 18–99 inclusive; anything else is `400`.                                                                                                                                                                                              |
+| A4  | Currency                     | INR only, `NUMERIC(10,2)`, sent as two-decimal strings.                                                                                                                                                                                        |
+| A5  | "Deterministic"              | Same inputs always give the same premium; the calculator is pure.                                                                                                                                                                              |
+| A6  | "Exactly 15 minutes"         | `expiresAt = createdAt + 15 min` from one `Date` instance. TTL comes from `QUOTE_TTL_SECONDS` (default 900) so expiry can be demoed.                                                                                                           |
+| A7  | Declaration endpoint         | `POST /api/v1/insurance/declaration` with the rules above.                                                                                                                                                                                     |
+| A8  | State machine                | Exactly four states. An ineligible declaration does not change state (`422`). A `DECLINED` state is left as a next step.                                                                                                                       |
+| A8b | Declaration vs. quote        | Declaring `NONE` on a quote priced with conditions lowers the price in place (the customer only benefits). Declaring conditions on a quote priced without them is rejected: raising a price needs the customer's consent, so they recalculate. |
+| A9  | Expired quotes               | Derived from `expires_at`, enforced server-side on every state change. The UI timer is UX only.                                                                                                                                                |
+| A10 | Payment                      | Mock gateway inside the API behind an interface. Tokens `tok_success`, `tok_declined`, `tok_error`. Latency configurable (default 800 ms) so loading and double clicks are observable.                                                         |
+| A11 | Idempotency header           | `Idempotency-Key` is canonical; `idempotency_key` is accepted as an alias. Required on checkout.                                                                                                                                               |
+| A12 | Browser to API               | Only through Next.js Server Components and Server Actions, using a server-only `API_BASE_URL`.                                                                                                                                                 |
+| A13 | JSON naming                  | camelCase in JSON, snake_case columns in the database.                                                                                                                                                                                         |
+| A14 | Smoking and hospitalisation  | Collected and stored with the declaration for underwriting review, but they affect neither price nor eligibility (the stated rules only use conditions and critical illness).                                                                  |
 
 ## Trade-offs
 
@@ -355,7 +388,8 @@ is only a convenience: the API enforces expiry regardless.
 - A transactional outbox for `policy.issued` events (emails, documents, CRM).
 - Scheduled cleanup of expired quotes and old idempotency keys.
 - A `DECLINED` state for ineligible applicants, with an audit trail.
-- Authentication, per-customer ownership of quotes, and rate limiting.
+- Authentication, per-customer ownership of quotes, and rate limiting (first priority: quotes hold
+  health data).
 - Observability with OpenTelemetry traces across web, API and gateway; metrics on refunds.
 - A payment reconciliation job for failed refunds and ambiguous gateway timeouts.
 - Contract tests against the real payment gateway's sandbox.

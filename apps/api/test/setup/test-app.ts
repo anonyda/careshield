@@ -23,9 +23,7 @@ export async function createTestApp(): Promise<TestContext> {
 }
 
 export async function resetDatabase(prisma: PrismaService): Promise<void> {
-  await prisma.$executeRawUnsafe(
-    'TRUNCATE TABLE policies, quotes, idempotency_keys RESTART IDENTITY CASCADE',
-  );
+  await prisma.$executeRawUnsafe('TRUNCATE TABLE policies, quotes, idempotency_keys CASCADE');
 }
 
 export const validDeclaration = {

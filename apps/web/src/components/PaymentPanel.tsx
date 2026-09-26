@@ -3,6 +3,7 @@
 import { startTransition, useActionState, useEffect, useOptimistic, useRef, useState } from 'react';
 import { checkoutAction } from '@/app/actions';
 import { formatINR } from '@/lib/format';
+import { newIdempotencyKey } from '@/lib/idempotencyKey';
 import { useCountdown } from '@/lib/useCountdown';
 import { PAYMENT_TOKENS, type CheckoutFormState } from '@/lib/types';
 import { CountdownTimer } from './CountdownTimer';
@@ -56,7 +57,7 @@ export function PaymentPanel({
     if (submitLock.current || expired) return;
     submitLock.current = true;
 
-    idempotencyKey.current ??= crypto.randomUUID();
+    idempotencyKey.current ??= newIdempotencyKey();
     const formData = new FormData(event.currentTarget);
     formData.set('idempotencyKey', idempotencyKey.current);
 

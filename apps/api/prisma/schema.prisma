@@ -36,7 +36,7 @@ model Quote {
   updatedAt                DateTime    @updatedAt @map("updated_at") @db.Timestamptz(3)
   policy                   Policy?
 
-  @@index([status, expiresAt])
+  @@index([status, expiresAt]) // not queried yet: reserved for the planned expired-quote cleanup job
   @@map("quotes")
 }
 
