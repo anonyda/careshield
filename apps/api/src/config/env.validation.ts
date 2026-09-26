@@ -6,7 +6,12 @@ export interface AppEnv {
   IDEMPOTENCY_LOCK_TTL_SECONDS: number;
 }
 
-function readInt(raw: Record<string, unknown>, name: string, fallback: number, min: number): number {
+function readInt(
+  raw: Record<string, unknown>,
+  name: string,
+  fallback: number,
+  min: number,
+): number {
   const value = raw[name];
   if (value === undefined || value === '') return fallback;
   const parsed = Number(value);
@@ -20,7 +25,9 @@ function readInt(raw: Record<string, unknown>, name: string, fallback: number, m
 export function validateEnv(raw: Record<string, unknown>): AppEnv {
   const databaseUrl = raw.DATABASE_URL;
   if (typeof databaseUrl !== 'string' || !/^postgres(ql)?:\/\//.test(databaseUrl)) {
-    throw new Error('Missing or invalid env DATABASE_URL: expected a postgresql:// connection string');
+    throw new Error(
+      'Missing or invalid env DATABASE_URL: expected a postgresql:// connection string',
+    );
   }
 
   return {
