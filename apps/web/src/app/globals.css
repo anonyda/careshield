@@ -1,26 +1,21 @@
-@import "tailwindcss";
+@import 'tailwindcss';
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+@theme {
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+@layer components {
+  .input {
+    @apply rounded-lg border border-slate-400 bg-white px-3 py-2 text-base text-slate-900;
+    @apply focus-visible:border-indigo-700 focus-visible:outline-3 focus-visible:outline-offset-1 focus-visible:outline-indigo-700;
+    @apply aria-invalid:border-red-600;
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+a:focus-visible,
+input[type='radio']:focus-visible,
+input[type='checkbox']:focus-visible {
+  outline: 3px solid var(--color-indigo-700);
+  outline-offset: 2px;
 }

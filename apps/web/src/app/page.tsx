@@ -1,7 +1,16 @@
+import { QuoteForm } from '@/components/QuoteForm';
+import { Stepper } from '@/components/Stepper';
+
 export default function Home() {
   return (
-    <main className="mx-auto max-w-xl px-4 py-12">
-      <h1 className="text-2xl font-semibold">CareShield Max</h1>
-    </main>
+    <>
+      <Stepper current="quote" />
+      <h1 className="text-2xl font-bold text-slate-900">Get your CareShield Max quote</h1>
+      <p className="mt-2 mb-6 text-slate-700">
+        Two quick questions and you&apos;ll see your premium. We&apos;ll hold the price for 15
+        minutes while you finish.
+      </p>
+      <QuoteForm />
+    </>
   );
 }
